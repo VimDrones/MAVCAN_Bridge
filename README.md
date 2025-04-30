@@ -14,7 +14,7 @@ MacOS, Windows, Linux is both supported
 
 ## Supported Hardware
 - [Vimdrones DroneCAN Adapter](https://dev.vimdrones.com/products/vimdrones_can_adapter)  
-![Vimdrones CAN Adapter Pinout](vimdrones_can_adapter_pinout.png)
+![Vimdrones CAN Adapter Pinout](/vimdrones_can_adapter.png)
 
 ## DFU Update for Existing Hardware
 To update the DroneCAN Adapter firmware, press the boot button and plug in the USB cable to enter DFU mode.
