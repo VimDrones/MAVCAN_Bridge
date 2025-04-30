@@ -71,8 +71,6 @@ void HAL_MspInit(void)
   __HAL_RCC_PWR_CLK_ENABLE();
 
   /* System interrupt init*/
-  /* PendSV_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(PendSV_IRQn, 3, 0);
 
   /* USER CODE BEGIN MspInit 1 */
 
@@ -108,6 +106,9 @@ void HAL_CAN_MspInit(CAN_HandleTypeDef* hcan)
     GPIO_InitStruct.Alternate = GPIO_AF4_CAN;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+    /* CAN interrupt Init */
+    HAL_NVIC_SetPriority(CEC_CAN_IRQn, 2, 0);
+    HAL_NVIC_EnableIRQ(CEC_CAN_IRQn);
     /* USER CODE BEGIN CAN_MspInit 1 */
 
     /* USER CODE END CAN_MspInit 1 */
@@ -138,6 +139,8 @@ void HAL_CAN_MspDeInit(CAN_HandleTypeDef* hcan)
     */
     HAL_GPIO_DeInit(GPIOB, GPIO_PIN_8|GPIO_PIN_9);
 
+    /* CAN interrupt DeInit */
+    HAL_NVIC_DisableIRQ(CEC_CAN_IRQn);
     /* USER CODE BEGIN CAN_MspDeInit 1 */
 
     /* USER CODE END CAN_MspDeInit 1 */
