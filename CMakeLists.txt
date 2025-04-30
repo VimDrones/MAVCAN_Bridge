@@ -19,7 +19,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Set the project name
-set(CMAKE_PROJECT_NAME MAVCAN_USB)
+set(CMAKE_PROJECT_NAME MAVCAN_Bridge)
 
 # Include toolchain file
 include("cmake/gcc-arm-none-eabi.cmake")
@@ -72,4 +72,16 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
     mavlink
     # Add user defined libraries
+)
+
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O ihex ${CMAKE_PROJECT_NAME}.elf ${CMAKE_PROJECT_NAME}.hex
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Generating HEX file: ${CMAKE_PROJECT_NAME}.hex"
+)
+
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary ${CMAKE_PROJECT_NAME}.elf ${CMAKE_PROJECT_NAME}.bin
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Generating BIN file: ${CMAKE_PROJECT_NAME}.bin"
 )
