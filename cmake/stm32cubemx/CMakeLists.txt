@@ -77,7 +77,8 @@ set(MX_LINK_DIRS
 # Project static libraries
 set(MX_LINK_LIBS 
     STM32_Drivers
-    USB_Device_Library	
+    USB_Device_Library
+	
 )
 # Interface library for includes and symbols
 add_library(stm32cubemx INTERFACE)
@@ -88,12 +89,14 @@ target_compile_definitions(stm32cubemx INTERFACE ${MX_Defines_Syms})
 add_library(STM32_Drivers OBJECT)
 target_sources(STM32_Drivers PRIVATE ${STM32_Drivers_Src})
 target_link_libraries(STM32_Drivers PUBLIC stm32cubemx)
+target_compile_options(STM32_Drivers PRIVATE -Wno-unused-parameter)
 
 
 # Create USB_Device_Library static library
 add_library(USB_Device_Library OBJECT)
 target_sources(USB_Device_Library PRIVATE ${USB_Device_Library_Src})
 target_link_libraries(USB_Device_Library PUBLIC stm32cubemx)
+target_compile_options(USB_Device_Library PRIVATE -Wno-unused-parameter)
 
 # Add STM32CubeMX generated application sources to the project
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${MX_Application_Src})

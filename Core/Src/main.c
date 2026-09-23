@@ -54,13 +54,19 @@ uint32_t last_heartbeat_time = 0;
 uint32_t heartbeat_interval = 1000; // 1Hz heartbeat
 uint32_t heartbeats_sent = 0;
 
-// USB variables
-uint8_t usb_rx_buffer[USB_RX_BUFFER_SIZE];
-volatile uint32_t usb_rx_count = 0;
-volatile uint8_t usb_rx_flag = 0;
+// USB ring buffer for reliable Windows reception
+typedef struct {
+  uint8_t data[USB_RX_PACKET_SIZE];
+  uint32_t len;
+} usb_packet_t;
+
+usb_packet_t usb_rx_ring[USB_RX_RING_SIZE];
+volatile uint8_t usb_rx_write_idx = 0;
+volatile uint8_t usb_rx_read_idx = 0;
+volatile uint8_t usb_rx_packets = 0;
 
 volatile uint32_t usb_process_interval;
-volatile uint32_t last_usb_process_time = 0; // Moved to global scope
+volatile uint32_t last_usb_process_time = 0;
 
 // CAN frame structure
 typedef struct {
@@ -104,6 +110,7 @@ static void MX_CAN_Init(void);
 uint32_t ProcessUSBtoCAN(void);
 uint32_t ProcessCANtoUSB(void);
 uint32_t SendCAN(void);
+void SendMavlinkHeartbeat(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -168,10 +175,7 @@ int main(void)
   can_tx_write_idx = 0;
   can_tx_read_idx = 0;
 
-  // Make sure USB is ready to receive data using interrupts
-  if (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED) {
-    USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-  }
+  // The CDC middleware prepares reception when the host configures USB.
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -185,19 +189,12 @@ int main(void)
     // Get current time once per loop
     uint32_t current_time = HAL_GetTick();
 
-    static uint32_t last_usb_poll_time = 0;
-    if (current_time - last_usb_poll_time >= 1) { // Poll every 1ms
-      last_usb_poll_time = current_time;
-      // Always keep USB endpoint ready
-      if (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED && !usb_rx_flag) {
-          USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-      }
-    }
+    // Retry a paused receive after space or the USB configured state returns.
+    CDC_ResumeReceive_FS();
 
     // Process USB data when available
-    if (usb_rx_flag) {
+    while (usb_rx_packets > 0) {
         ProcessUSBtoCAN();
-        usb_rx_flag = 0;
         
         // Send frames immediately after processing
         if (can_tx_count > 0) {
@@ -404,7 +401,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 }
 
 /**
- * @brief Process USB to CAN data safely
+ * @brief Process USB to CAN data
  * @retval Number of processed bytes
  */
 uint32_t ProcessUSBtoCAN(void)
@@ -413,17 +410,31 @@ uint32_t ProcessUSBtoCAN(void)
   static mavlink_status_t status;
   uint32_t processed = 0;
   
-  // Skip flag check - we already checked in the caller
-  uint32_t bytes = usb_rx_count;
+  // USB reset/deinit can clear the queue, so check and dequeue atomically.
+  usb_packet_t packet;
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (usb_rx_packets == 0) {
+    __set_PRIMASK(primask);
+    return 0;
+  }
+  memcpy(&packet, (void*)&usb_rx_ring[usb_rx_read_idx], sizeof(usb_packet_t));
+  usb_rx_read_idx = (usb_rx_read_idx + 1) % USB_RX_RING_SIZE;
+  usb_rx_packets--;
+  __set_PRIMASK(primask);
+
+  CDC_ResumeReceive_FS();
   
-  // Process bytes in larger chunks for better cache efficiency
+  uint32_t bytes = packet.len;
+  
+  // Process in chunks for cache efficiency
   for (uint32_t i = 0; i < bytes; ) {
     // Process up to 16 bytes at once
     uint32_t chunk_end = i + 16;
     if (chunk_end > bytes) chunk_end = bytes;
     
     for (; i < chunk_end; i++) {
-      if (mavlink_parse_char(MAVLINK_COMM_0, usb_rx_buffer[i], &msg, &status)) {
+      if (mavlink_parse_char(MAVLINK_COMM_0, packet.data[i], &msg, &status)) {
         mavlink_rx_count++;
         
         if (msg.msgid == MAVLINK_MSG_ID_CAN_FRAME) {
@@ -446,11 +457,12 @@ uint32_t ProcessUSBtoCAN(void)
               memcpy((void*)frame->data, can_frame.data, frame->dlc);
             }
             
-            // Minimal critical section
+            // Preserve the caller's interrupt state while publishing the frame.
+            uint32_t can_primask = __get_PRIMASK();
             __disable_irq();
             can_tx_write_idx = (idx + 1) % CAN_BUFFER_SIZE;
             can_tx_count++;
-            __enable_irq();
+            __set_PRIMASK(can_primask);
           }
         }
       }

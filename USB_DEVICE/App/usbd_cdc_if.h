@@ -94,7 +94,9 @@
 extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
 
 /* USER CODE BEGIN EXPORTED_VARIABLES */
-
+extern volatile uint32_t usb_rx_pause_count;
+extern volatile uint32_t usb_rx_resume_count;
+extern volatile uint16_t usb_control_line_state;
 /* USER CODE END EXPORTED_VARIABLES */
 
 /**
@@ -109,7 +111,7 @@ extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
 uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 
 /* USER CODE BEGIN EXPORTED_FUNCTIONS */
-
+void CDC_ResumeReceive_FS(void);
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**

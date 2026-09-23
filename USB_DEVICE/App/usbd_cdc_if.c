@@ -20,10 +20,24 @@ extern volatile struct {
   uint8_t data[8];
 } can_tx_buffer[];
 
-// External references to main.c variables
-extern uint8_t usb_rx_buffer[];
-extern volatile uint32_t usb_rx_count;
-extern volatile uint8_t usb_rx_flag;
+// USB ring buffer interface
+#define USB_RX_PACKET_SIZE 64
+#define USB_RX_RING_SIZE 8
+
+typedef struct {
+  uint8_t data[USB_RX_PACKET_SIZE];
+  uint32_t len;
+} usb_packet_t;
+
+extern usb_packet_t usb_rx_ring[];
+extern volatile uint8_t usb_rx_write_idx;
+extern volatile uint8_t usb_rx_read_idx;
+extern volatile uint8_t usb_rx_packets;
+
+static volatile uint8_t usb_rx_paused = 0;
+volatile uint32_t usb_rx_pause_count = 0;
+volatile uint32_t usb_rx_resume_count = 0;
+volatile uint16_t usb_control_line_state = 0;
 
 /* USER CODE END INCLUDE */
 
@@ -92,6 +106,13 @@ uint8_t UserRxBufferFS[APP_RX_DATA_SIZE];
 uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
+// Store line coding for Windows compatibility
+static USBD_CDC_LineCodingTypeDef LineCoding = {
+  115200, /* baud rate*/
+  0x00,   /* stop bits-1*/
+  0x00,   /* parity - none*/
+  0x08    /* nb. of bits 8*/
+};
 /* USER CODE END PRIVATE_VARIABLES */
 
 /**
@@ -138,6 +159,37 @@ USBD_CDC_ItfTypeDef USBD_Interface_fops_FS =
 };
 
 /* Private functions ---------------------------------------------------------*/
+static void CDC_ResetReceive_FS(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  usb_rx_write_idx = 0;
+  usb_rx_read_idx = 0;
+  usb_rx_packets = 0;
+  usb_rx_paused = 0;
+  usb_control_line_state = 0;
+  __set_PRIMASK(primask);
+}
+
+/**
+ * Resume a completed OUT transfer once the main loop has made room.
+ * Leave an already armed transfer untouched, including during port setup.
+ */
+void CDC_ResumeReceive_FS(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (usb_rx_paused && usb_rx_packets < USB_RX_RING_SIZE &&
+      hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
+      hUsbDeviceFS.pClassData != NULL) {
+    if (USBD_CDC_ReceivePacket(&hUsbDeviceFS) == USBD_OK) {
+      usb_rx_paused = 0;
+      usb_rx_resume_count++;
+    }
+  }
+  __set_PRIMASK(primask);
+}
+
 /**
   * @brief  Initializes the CDC media low layer over the FS USB IP
   * @retval USBD_OK if all operations are OK else USBD_FAIL
@@ -145,9 +197,11 @@ USBD_CDC_ItfTypeDef USBD_Interface_fops_FS =
 static int8_t CDC_Init_FS(void)
 {
   /* USER CODE BEGIN 3 */
-  /* Set Application Buffers */
+  CDC_ResetReceive_FS();
   USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, 0);
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
+  /* The CDC middleware prepares the initial OUT transfer after Init returns. */
+  
   return USBD_OK;
   /* USER CODE END 3 */
 }
@@ -159,6 +213,7 @@ static int8_t CDC_Init_FS(void)
 static int8_t CDC_DeInit_FS(void)
 {
   /* USER CODE BEGIN 4 */
+  CDC_ResetReceive_FS();
   return USBD_OK;
   /* USER CODE END 4 */
 }
@@ -188,44 +243,21 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
     case CDC_CLEAR_COMM_FEATURE:
       break;
     case CDC_SET_LINE_CODING:
-      // Just acknowledge, don't actually change settings
+      LineCoding.bitrate = ((USBD_CDC_LineCodingTypeDef*)pbuf)->bitrate;
+      LineCoding.format = ((USBD_CDC_LineCodingTypeDef*)pbuf)->format;
+      LineCoding.paritytype = ((USBD_CDC_LineCodingTypeDef*)pbuf)->paritytype;
+      LineCoding.datatype = ((USBD_CDC_LineCodingTypeDef*)pbuf)->datatype;
       break;
     case CDC_GET_LINE_CODING:
-      // Return some standard values
-      ((USBD_CDC_LineCodingTypeDef*)pbuf)->bitrate = 1000000; // Just report 1Mbps
-      ((USBD_CDC_LineCodingTypeDef*)pbuf)->format = 0;
-      ((USBD_CDC_LineCodingTypeDef*)pbuf)->paritytype = 0;
-      ((USBD_CDC_LineCodingTypeDef*)pbuf)->datatype = 8;
+      ((USBD_CDC_LineCodingTypeDef*)pbuf)->bitrate = LineCoding.bitrate;
+      ((USBD_CDC_LineCodingTypeDef*)pbuf)->format = LineCoding.format;
+      ((USBD_CDC_LineCodingTypeDef*)pbuf)->paritytype = LineCoding.paritytype;
+      ((USBD_CDC_LineCodingTypeDef*)pbuf)->datatype = LineCoding.datatype;
       break;
     case CDC_SET_CONTROL_LINE_STATE:
-      {
-        // Extract the DTR and RTS states from the setup packet
-        // DTR is bit 0, RTS is bit 1
-        uint16_t ctrl_line_state = (uint16_t)(pbuf[0] | (pbuf[1] << 8));
-        uint8_t dtr_state = (ctrl_line_state & 0x01) ? 1 : 0;
-        uint8_t rts_state = (ctrl_line_state & 0x02) ? 1 : 0;
-        
-        // Store the line state for reference elsewhere in the code
-        static uint8_t previous_dtr_state = 0;
-        static uint8_t usb_connected = 0;
-        
-        // Detect DTR rising edge (terminal program connected)
-        if (dtr_state && !previous_dtr_state) {
-          usb_connected = 1;
-          
-          // Clear any pending flags
-          usb_rx_flag = 0;
-          
-          // Re-arm the USB endpoint to ensure it's ready
-          USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-        } 
-        // Detect DTR falling edge (terminal disconnected)
-        else if (!dtr_state && previous_dtr_state) {
-          usb_connected = 0;
-        }
-        
-        previous_dtr_state = dtr_state;
-      }
+      /* No-data CDC requests pass the complete setup request to Control. */
+      usb_control_line_state = ((USBD_SetupReqTypedef*)pbuf)->wValue;
+      /* Opening/closing the host port must not discard or rearm queued data. */
       break;
     case CDC_SEND_BREAK:
       break;
@@ -254,13 +286,26 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  // Copy received data to our buffer
-  if(*Len <= USB_RX_BUFFER_SIZE && !usb_rx_flag) {
-    memcpy(usb_rx_buffer, Buf, *Len);
-    usb_rx_count = *Len;
-    usb_rx_flag = 1;  // Set flag for main loop processing
+  // Add packet to ring buffer if space available
+  if(*Len > 0 && *Len <= USB_RX_PACKET_SIZE && usb_rx_packets < USB_RX_RING_SIZE) {
+    usb_packet_t *packet = (usb_packet_t*)&usb_rx_ring[usb_rx_write_idx];
+    memcpy(packet->data, Buf, *Len);
+    packet->len = *Len;
+    
+    usb_rx_write_idx = (usb_rx_write_idx + 1) % USB_RX_RING_SIZE;
+    usb_rx_packets++;
   }
 
+  /* This transfer is complete. Main-loop dequeue resumes it if we are full. */
+  usb_rx_paused = 1;
+  if (usb_rx_packets < USB_RX_RING_SIZE) {
+    if (USBD_CDC_ReceivePacket(&hUsbDeviceFS) == USBD_OK) {
+      usb_rx_paused = 0;
+    }
+  } else {
+    usb_rx_pause_count++;
+  }
+  
   return (USBD_OK);
   /* USER CODE END 6 */
 }
